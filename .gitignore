@@ -1,0 +1,17 @@
+# artefactos de compilacion de PyInstaller
+build/
+dist/
+*.spec
+
+# el ejecutable se publica en Releases, no en el repo
+DVD Saito.exe
+
+# cache de Python
+__pycache__/
+*.pyc
+
+# archivos temporales de pruebas
+_*.png
+
+# configuracion local del entorno
+.claude/
