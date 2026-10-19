@@ -8,6 +8,7 @@ python -m PyInstaller --noconfirm --onefile --windowed --name "DVD Saito" ^
   --icon "saito\assets\saito.ico" ^
   --add-data "saito\assets\dvd.webp;saito\assets" ^
   --collect-all tkinterdnd2 ^
+  --collect-all imageio_ffmpeg ^
   main.py
 
 if exist "dist\DVD Saito.exe" (

@@ -28,6 +28,9 @@ Se descarga `DVD Saito.exe`, doble clic y listo: no requiere instalación.
   EXIF de la foto, o de la fecha del archivo, y también se puede escribir a mano.
 - **Proporciones / estirado**: deformar la imagen a 1:1, 4:3, 16:9, 9:16, con
   sliders de ancho y alto, o escribiendo el tamaño exacto en píxeles.
+- **Videos**: abre mp4, mov, avi, mkv, webm... y aplica los mismos filtros,
+  ajustes y estirado que a las imágenes. Al guardar se exporta un mp4 con el
+  audio original (el botón "Aplicar efecto" solo funciona con imágenes).
 - **Efectos encadenados**: el botón "Aplicar efecto" fija el efecto actual y
   deja poner otro encima, con deshacer.
 - **Arrastrar y soltar** imágenes para abrirlas.
@@ -36,10 +39,10 @@ Se descarga `DVD Saito.exe`, doble clic y listo: no requiere instalación.
 
 ## Correr desde el código
 
-Requiere Python 3.13 con `pillow`, `numpy` y `tkinterdnd2`:
+Requiere Python 3.13 con `pillow`, `numpy`, `imageio-ffmpeg` y `tkinterdnd2`:
 
 ```
-pip install pillow numpy tkinterdnd2
+pip install pillow numpy imageio-ffmpeg tkinterdnd2
 python main.py
 ```
 
@@ -57,6 +60,7 @@ saito/
   window.py          mover, redimensionar, minimizar y maximizar
   splash.py          pantalla de arranque azul
   dialogs.py         diálogo Acerca de
+  video.py           lectura y exportación de video
   theme.py           colores, fuentes y recursos
   assets/            icono de la app
   engine/            motor de imagen

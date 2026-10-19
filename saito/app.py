@@ -7,6 +7,7 @@ ventana, la pantalla de arranque y el dialogo Acerca de estan en otros modulos.
 """
 
 import os
+import threading
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -20,6 +21,7 @@ from .theme import (BASE, HAS_DND, DND_FILES, resource_path,
 from .window import WindowMixin
 from .splash import SplashMixin
 from .dialogs import win98_dialog
+from . import video
 
 
 class Saito(WindowMixin, SplashMixin, BASE):
@@ -50,6 +52,9 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self._normal_geo = None
         self._revealed = False
         self._splash_win = None
+        self.video_path = None      # si hay un video abierto; original es su primer cuadro
+        self.video_meta = None
+        self._exporting = False
 
         self._load_icon()
         self._build()
@@ -144,7 +149,7 @@ class Saito(WindowMixin, SplashMixin, BASE):
         sf = tk.Frame(outer, bg=FACE)
         sf.grid(row=4, column=0, sticky="ew")
         sf.grid_columnconfigure(0, weight=1)
-        self.status = tk.Label(sf, text="  Listo.  Arrastra una imagen para abrirla.",
+        self.status = tk.Label(sf, text="  Listo.  Arrastra una imagen o video para abrirla.",
                                bd=1, relief="sunken", anchor="w", bg=FACE, fg=BLACK, font=FONT)
         self.status.grid(row=0, column=0, sticky="ew")
         grip = tk.Canvas(sf, width=18, height=18, bg=FACE, highlightthickness=0,
@@ -170,7 +175,7 @@ class Saito(WindowMixin, SplashMixin, BASE):
             return dd
 
         arch = menu("Archivo")
-        arch.add_command(label="Abrir imagen...", command=self.open_image)
+        arch.add_command(label="Abrir imagen o video...", command=self.open_image)
         arch.add_command(label="Guardar como...", command=self.save_image)
         arch.add_separator()
         arch.add_command(label="Salir", command=self.destroy)
@@ -382,18 +387,29 @@ class Saito(WindowMixin, SplashMixin, BASE):
     # ----------------------------------------------------------- acciones
     def open_image(self):
         path = filedialog.askopenfilename(
-            title="Elegir una imagen",
-            filetypes=[("Imágenes", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff"),
+            title="Elegir una imagen o video",
+            filetypes=[("Imágenes y videos",
+                        "*.jpg *.jpeg *.png *.bmp *.webp *.tiff *.mp4 *.mov *.avi *.mkv *.webm *.m4v *.wmv"),
+                       ("Imágenes", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff"),
+                       ("Videos", "*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.wmv"),
                        ("Todos los archivos", "*.*")])
         if path:
             self._load_path(path)
 
     def _load_path(self, path):
-        try:
-            img = Image.open(path).convert("RGB")
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo abrir la imagen:\n{e}")
+        if self._exporting:
             return
+        vid = video.is_video(path)
+        try:
+            if vid:
+                img, meta = video.open_video(path)
+            else:
+                img, meta = Image.open(path).convert("RGB"), None
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
+            return
+        self.video_path = path if vid else None
+        self.video_meta = meta
         self.original = img
         prev = img.copy()
         prev.thumbnail((MAX_PREVIEW, MAX_PREVIEW), Image.LANCZOS)
@@ -401,17 +417,23 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self._history = []
         self.save_btn.config(state="normal")
         self.reset_btn.config(state="normal")
-        self.apply_btn.config(state="normal")
+        # "aplicar efecto" fija el efecto en una sola imagen, no tiene sentido en un video
+        self.apply_btn.config(state="disabled" if vid else "normal")
         dt, src = self._photo_date(path, img)
         self._set_stamp_date(dt, src)
+        kind = f"video {meta['fps']:.0f} fps, {meta['duration']:.1f} s" if vid else ""
         self.status.config(text=f"  {os.path.basename(path)}   -   {img.width} x {img.height} px"
+                                f"{'   -   ' + kind if kind else ''}"
                                 f"   -   fecha: {dt.strftime('%d/%m/%Y')} ({src})")
         self._populate_filters(self.current_category)
         self.render()
         self._sync_size_entries()
 
     def save_image(self):
-        if self.original is None:
+        if self.original is None or self._exporting:
+            return
+        if self.video_path:
+            self._save_video()
             return
         path = filedialog.asksaveasfilename(
             title="Guardar imagen", defaultextension=".png",
@@ -427,6 +449,44 @@ class Saito(WindowMixin, SplashMixin, BASE):
             self.status.config(text=f"  Guardado: {path}")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo guardar:\n{e}")
+
+    def _save_video(self):
+        path = filedialog.asksaveasfilename(
+            title="Guardar video", defaultextension=".mp4",
+            filetypes=[("MP4", "*.mp4")])
+        if not path:
+            return
+        src, meta, settings = self.video_path, self.video_meta, dict(self.settings)
+        total = max(1, int(meta.get("duration", 0) * meta.get("fps", 25)))
+        self._exporting = True
+        self.save_btn.config(state="disabled")
+        state = {"n": 0, "finished": False, "err": None}
+
+        def work():
+            try:
+                video.export_video(src, path, settings, meta,
+                                   progress=lambda n: state.update(n=n))
+            except Exception as e:
+                state["err"] = e
+            state["finished"] = True
+
+        def poll():
+            # el hilo solo escribe en `state`; la interfaz se toca desde aqui
+            if not state["finished"]:
+                self.status.config(
+                    text=f"  Exportando video... {min(99, state['n'] * 100 // total)}%")
+                self.after(150, poll)
+                return
+            self._exporting = False
+            self.save_btn.config(state="normal")
+            if state["err"] is not None:
+                messagebox.showerror("Error", f"No se pudo guardar el video:\n{state['err']}")
+            else:
+                self.status.config(text=f"  Guardado: {path}")
+
+        self.status.config(text="  Exportando video... 0%")
+        threading.Thread(target=work, daemon=True).start()
+        self.after(150, poll)
 
     # ----------------------------------------------------------- filtros
     def _populate_filters(self, category):
@@ -607,7 +667,7 @@ class Saito(WindowMixin, SplashMixin, BASE):
 
     def apply_effect(self):
         """Fija el efecto actual en la imagen para poder ponerle otro encima."""
-        if self.original is None:
+        if self.original is None or self.video_path:
             return
         try:
             baked = eng.process(self.original, self.settings)
@@ -621,7 +681,7 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self.status.config(text="  Efecto aplicado. Puedes agregar otro encima.")
 
     def undo_apply(self):
-        if not self._history:
+        if not self._history or self.video_path:
             self.status.config(text="  No hay efectos aplicados para deshacer.")
             return
         self._rebase(self._history.pop())
@@ -665,8 +725,8 @@ class Saito(WindowMixin, SplashMixin, BASE):
             self.render()
 
     def _show_placeholder(self):
-        self.canvas.config(image="", text="[ sin imagen ]\n\nArrastra una imagen aquí\n"
-                           "o usa el menú  Archivo > Abrir imagen", fg="#c0c0c0",
+        self.canvas.config(image="", text="[ sin imagen ]\n\nArrastra una imagen o video aquí\n"
+                           "o usa el menú  Archivo > Abrir imagen o video", fg="#c0c0c0",
                            font=("MS Sans Serif", 10))
 
     # ------------------------------------------------------------ helpers
