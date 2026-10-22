@@ -8,6 +8,8 @@ ventana, la pantalla de arranque y el dialogo Acerca de estan en otros modulos.
 
 import os
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -55,6 +57,10 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self.video_path = None      # si hay un video abierto; original es su primer cuadro
         self.video_meta = None
         self._exporting = False
+        self._playing = False
+        self._play_job = None
+        self._play_latest = None
+        self._play_stop = None
 
         self._load_icon()
         self._build()
@@ -346,6 +352,16 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self.w_entry.bind("<Return>", lambda e: self.apply_manual_size())
         self.h_entry.bind("<Return>", lambda e: self.apply_manual_size())
 
+        # solo se usa con videos
+        g = self._group(panel, "Video")
+        self.play_btn = self._btn(g, "▶ Reproducir vista previa", self.toggle_play)
+        self.play_btn.pack(fill="x", padx=6, pady=(4, 2))
+        self.play_btn.config(state="disabled")
+        self.hq_var = tk.IntVar(value=1)
+        tk.Checkbutton(g, text="Exportar en máxima calidad (archivo más pesado)",
+                       variable=self.hq_var, bg=FACE, fg=BLACK, font=FONT,
+                       activebackground=FACE, anchor="w").pack(fill="x", padx=6, pady=(0, 4))
+
         self._highlight(self.aspect_btns, "Original")
 
     def _add_scale(self, parent, key, label, lo, hi):
@@ -399,6 +415,7 @@ class Saito(WindowMixin, SplashMixin, BASE):
     def _load_path(self, path):
         if self._exporting:
             return
+        self.stop_play()
         vid = video.is_video(path)
         try:
             if vid:
@@ -419,6 +436,7 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self.reset_btn.config(state="normal")
         # "aplicar efecto" fija el efecto en una sola imagen, no tiene sentido en un video
         self.apply_btn.config(state="disabled" if vid else "normal")
+        self.play_btn.config(state="normal" if vid else "disabled")
         dt, src = self._photo_date(path, img)
         self._set_stamp_date(dt, src)
         kind = f"video {meta['fps']:.0f} fps, {meta['duration']:.1f} s" if vid else ""
@@ -457,14 +475,17 @@ class Saito(WindowMixin, SplashMixin, BASE):
         if not path:
             return
         src, meta, settings = self.video_path, self.video_meta, dict(self.settings)
+        hq = bool(self.hq_var.get())
         total = max(1, int(meta.get("duration", 0) * meta.get("fps", 25)))
+        self.stop_play()
         self._exporting = True
         self.save_btn.config(state="disabled")
+        self.play_btn.config(state="disabled")
         state = {"n": 0, "finished": False, "err": None}
 
         def work():
             try:
-                video.export_video(src, path, settings, meta,
+                video.export_video(src, path, settings, meta, max_quality=hq,
                                    progress=lambda n: state.update(n=n))
             except Exception as e:
                 state["err"] = e
@@ -479,6 +500,7 @@ class Saito(WindowMixin, SplashMixin, BASE):
                 return
             self._exporting = False
             self.save_btn.config(state="normal")
+            self.play_btn.config(state="normal")
             if state["err"] is not None:
                 messagebox.showerror("Error", f"No se pudo guardar el video:\n{state['err']}")
             else:
@@ -487,6 +509,90 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self.status.config(text="  Exportando video... 0%")
         threading.Thread(target=work, daemon=True).start()
         self.after(150, poll)
+
+    # ------------------------------------------------- reproduccion de video
+    PLAY_SIDE = 640     # lado mayor de la reproduccion; mas grande no llega a los fps del video
+
+    def toggle_play(self):
+        if self._playing:
+            self.stop_play()
+        elif self.video_path and not self._exporting:
+            self._playing = True
+            self._play_latest = None
+            self._play_stop = threading.Event()
+            self.play_btn.config(text="❚❚ Pausar vista previa")
+            threading.Thread(target=self._play_worker, daemon=True,
+                             args=(self._play_stop, self.video_path, self.video_meta)).start()
+            self._play_tick()
+
+    def stop_play(self):
+        self._playing = False
+        if getattr(self, "_play_stop", None) is not None:
+            self._play_stop.set()
+        if self._play_job:
+            self.after_cancel(self._play_job)
+            self._play_job = None
+        if hasattr(self, "play_btn"):
+            self.play_btn.config(text="▶ Reproducir vista previa")
+
+    def _play_worker(self, stop, path, meta):
+        """Decodifica en este hilo y procesa varios cuadros a la vez en un pool,
+        para no trabar la interfaz y llegar a los fps del video. Sigue el reloj
+        del video: si va lento, salta cuadros."""
+        fps = float(meta.get("fps") or 25)
+        lock = threading.Lock()
+        slots = threading.Semaphore(8)      # maximo de cuadros en proceso a la vez
+        shown = [-1]
+
+        def job(idx, frame):
+            try:
+                if stop.is_set():
+                    return
+                out = eng.process(frame, self._preview_settings(frame.size))
+                out = self._fit(out, fast=True)
+                with lock:
+                    if idx > shown[0] and not stop.is_set():   # nunca un cuadro mas viejo
+                        shown[0] = idx
+                        self._play_latest = out
+            except Exception as e:
+                self._play_latest = e
+            finally:
+                slots.release()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            try:
+                while not stop.is_set():
+                    t0 = time.perf_counter()
+                    shown[0] = -1
+                    n = 0
+                    for frame in video.preview_frames(path, meta, self.PLAY_SIDE):
+                        if stop.is_set():
+                            return
+                        n += 1
+                        due = n / fps - (time.perf_counter() - t0)
+                        if due < -1 / fps:
+                            continue        # vamos atrasados: saltar este cuadro
+                        if due > 0:
+                            stop.wait(due)
+                        while not slots.acquire(timeout=0.05):
+                            if stop.is_set():
+                                return
+                        pool.submit(job, n, frame)
+            except Exception as e:
+                self._play_latest = e
+
+    def _play_tick(self):
+        self._play_job = None
+        if not self._playing:
+            return
+        out, self._play_latest = self._play_latest, None
+        if isinstance(out, Exception):
+            self.stop_play()
+            messagebox.showerror("Error", f"No se pudo reproducir:\n{out}")
+            return
+        if out is not None:
+            self._display(out, fitted=True)
+        self._play_job = self.after(8, self._play_tick)
 
     # ----------------------------------------------------------- filtros
     def _populate_filters(self, category):
@@ -697,6 +803,12 @@ class Saito(WindowMixin, SplashMixin, BASE):
         self._render_job = None
         if self.preview_src is None:
             return
+        if self._playing:
+            return      # el siguiente cuadro ya usa los ajustes nuevos
+        out = eng.process(self.preview_src, self._preview_settings())
+        self._display(out)
+
+    def _preview_settings(self, size=None):
         s = self.settings
         ow, oh = int(s.get("out_w", 0) or 0), int(s.get("out_h", 0) or 0)
         if ow > 0 and oh > 0:
@@ -704,16 +816,21 @@ class Saito(WindowMixin, SplashMixin, BASE):
             # asi no reescalamos a la resolucion completa en cada cambio
             sc = min(MAX_PREVIEW / ow, MAX_PREVIEW / oh, 1.0)
             s = {**s, "out_w": max(1, round(ow * sc)), "out_h": max(1, round(oh * sc))}
-        out = eng.process(self.preview_src, s)
-        self._display(out)
+        return s
 
-    def _display(self, pil_img):
+    def _fit(self, pil_img, fast=False):
+        """Ajusta la imagen al tamano de la vista previa."""
         box_w = max(50, self.view_w - 16)
         box_h = max(50, self.view_h - 16)
         w, h = pil_img.size
         scale = min(box_w / w, box_h / h)
         dw, dh = max(1, int(w * scale)), max(1, int(h * scale))
-        self._display_img = ImageTk.PhotoImage(pil_img.resize((dw, dh), Image.LANCZOS))
+        return pil_img.resize((dw, dh), Image.BILINEAR if fast else Image.LANCZOS)
+
+    def _display(self, pil_img, fast=False, fitted=False):
+        if not fitted:
+            pil_img = self._fit(pil_img, fast)
+        self._display_img = ImageTk.PhotoImage(pil_img)
         self.canvas.config(image=self._display_img, text="")
 
     def _show_compare(self, show_original):

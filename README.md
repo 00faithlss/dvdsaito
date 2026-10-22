@@ -31,6 +31,7 @@ Se descarga `DVD Saito.exe`, doble clic y listo: no requiere instalación.
 - **Videos**: abre mp4, mov, avi, mkv, webm... y aplica los mismos filtros,
   ajustes y estirado que a las imágenes. Al guardar se exporta un mp4 con el
   audio original (el botón "Aplicar efecto" solo funciona con imágenes).
+  Incluye reproducción de la vista previa y exportación opcional en máxima calidad.
 - **Efectos encadenados**: el botón "Aplicar efecto" fija el efecto actual y
   deja poner otro encima, con deshacer.
 - **Arrastrar y soltar** imágenes para abrirlas.
